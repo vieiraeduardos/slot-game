@@ -1,15 +1,5 @@
 /**
- * SoundManager
- * All sounds synthesized via Web Audio API — no external files needed.
- *
- * Usage:
- *   const sfx = new SoundManager()
- *   sfx.spin()        // call while reels are spinning
- *   sfx.stopSpin()    // call when reels stop
- *   sfx.coin()        // single coin clink
- *   sfx.coins()       // cascading coins (win)
- *   sfx.win()         // victory jingle
- *   sfx.click()       // button click
+ * SoundManager — all sounds via Web Audio API, zero external files.
  */
 export class SoundManager {
     private ctx: AudioContext | null = null
@@ -17,148 +7,149 @@ export class SoundManager {
     private spinGain: GainNode | null = null
     private coinInterval: ReturnType<typeof setInterval> | null = null
 
-    /** Lazily create AudioContext on first user interaction */
     private getCtx(): AudioContext {
-        if (!this.ctx) {
-            this.ctx = new AudioContext()
-        }
-        // Resume if suspended (browser autoplay policy)
-        if (this.ctx.state === "suspended") {
-            this.ctx.resume()
-        }
+        if (!this.ctx) this.ctx = new AudioContext()
+        if (this.ctx.state === "suspended") this.ctx.resume()
         return this.ctx
     }
 
-    // ─── Helpers ───────────────────────────────────────────────────────────────
-
-    private masterGain(ctx: AudioContext, value = 0.4): GainNode {
+    private out(ctx: AudioContext, vol = 0.4): GainNode {
         const g = ctx.createGain()
-        g.gain.value = value
+        g.gain.value = vol
         g.connect(ctx.destination)
         return g
     }
 
-    private oscillator(
-        ctx: AudioContext,
-        dest: AudioNode,
-        type: OscillatorType,
-        freq: number,
-        startTime: number,
-        endTime: number,
-        freqEnd?: number
-    ) {
-        const osc = ctx.createOscillator()
-        osc.type = type
-        osc.frequency.setValueAtTime(freq, startTime)
-        if (freqEnd !== undefined) {
-            osc.frequency.linearRampToValueAtTime(freqEnd, endTime)
-        }
-        osc.connect(dest)
-        osc.start(startTime)
-        osc.stop(endTime)
+    private adsr(g: GainNode, ctx: AudioContext, a: number, d: number, s: number, r: number, t: number, peak = 1) {
+        g.gain.setValueAtTime(0, t)
+        g.gain.linearRampToValueAtTime(peak, t + a)
+        g.gain.linearRampToValueAtTime(s * peak, t + a + d)
+        g.gain.setValueAtTime(s * peak, t + a + d)
+        g.gain.linearRampToValueAtTime(0, t + a + d + r)
     }
 
-    private envelope(
-        gainNode: GainNode,
-        ctx: AudioContext,
-        attack: number,
-        decay: number,
-        sustain: number,
-        release: number,
-        startTime: number,
-        peakValue = 1
-    ) {
-        const g = gainNode.gain
-        g.setValueAtTime(0, startTime)
-        g.linearRampToValueAtTime(peakValue, startTime + attack)
-        g.linearRampToValueAtTime(sustain * peakValue, startTime + attack + decay)
-        g.setValueAtTime(sustain * peakValue, startTime + attack + decay)
-        g.linearRampToValueAtTime(0, startTime + attack + decay + release)
+    private osc(ctx: AudioContext, dest: AudioNode, type: OscillatorType, freq: number, t0: number, t1: number, freqEnd?: number) {
+        const o = ctx.createOscillator()
+        o.type = type
+        o.frequency.setValueAtTime(freq, t0)
+        if (freqEnd !== undefined) o.frequency.linearRampToValueAtTime(freqEnd, t1)
+        o.connect(dest)
+        o.start(t0)
+        o.stop(t1 + 0.01)
     }
 
     // ─── Click ─────────────────────────────────────────────────────────────────
-
     click() {
         const ctx = this.getCtx()
-        const master = this.masterGain(ctx, 0.3)
         const now = ctx.currentTime
-
-        const gainNode = ctx.createGain()
-        gainNode.connect(master)
-        this.envelope(gainNode, ctx, 0.002, 0.02, 0, 0.05, now, 1)
-        this.oscillator(ctx, gainNode, "square", 800, now, now + 0.07, 400)
+        const g = ctx.createGain()
+        g.connect(ctx.destination)
+        this.adsr(g, ctx, 0.002, 0.015, 0, 0.04, now, 0.4)
+        this.osc(ctx, g, "square", 900, now, now + 0.06, 500)
     }
 
-    // ─── Spin ──────────────────────────────────────────────────────────────────
-
+    // ─── Spin (mechanical noise loop) ─────────────────────────────────────────
     spin() {
         const ctx = this.getCtx()
-        if (this.spinNode) return  // already playing
+        if (this.spinNode) return
 
-        // Create a looping noise buffer to simulate mechanical reel sound
-        const bufferSize = ctx.sampleRate * 0.5
-        const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate)
-        const data = buffer.getChannelData(0)
-        for (let i = 0; i < bufferSize; i++) {
-            data[i] = (Math.random() * 2 - 1) * 0.3
-        }
+        const sr = ctx.sampleRate
+        const buf = ctx.createBuffer(1, sr * 0.4, sr)
+        const data = buf.getChannelData(0)
+        for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * 0.4
 
-        // Bandpass filter to make it sound like a mechanical click-clack
         const filter = ctx.createBiquadFilter()
         filter.type = "bandpass"
-        filter.frequency.value = 180
-        filter.Q.value = 0.8
+        filter.frequency.value = 200
+        filter.Q.value = 1.2
+
+        // Add a subtle periodic click to simulate reel ticks
+        const click = ctx.createOscillator()
+        click.type = "square"
+        click.frequency.value = 12  // ~12 clicks per second
+        const clickGain = ctx.createGain()
+        clickGain.gain.value = 0.04
+        click.connect(clickGain)
+        clickGain.connect(ctx.destination)
+        click.start()
 
         this.spinGain = ctx.createGain()
-        this.spinGain.gain.value = 0.18
+        this.spinGain.gain.value = 0.2
 
         this.spinNode = ctx.createBufferSource()
-        this.spinNode.buffer = buffer
+        this.spinNode.buffer = buf
         this.spinNode.loop = true
         this.spinNode.connect(filter)
         filter.connect(this.spinGain)
         this.spinGain.connect(ctx.destination)
         this.spinNode.start()
+
+        // Store click ref for cleanup
+        ;(this.spinNode as any)._clickOsc = click
+        ;(this.spinNode as any)._clickGain = clickGain
     }
 
     stopSpin() {
         if (!this.spinNode || !this.spinGain) return
         const ctx = this.getCtx()
-        this.spinGain.gain.setValueAtTime(this.spinGain.gain.value, ctx.currentTime)
-        this.spinGain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.15)
+        const now = ctx.currentTime
+
+        this.spinGain.gain.setValueAtTime(this.spinGain.gain.value, now)
+        this.spinGain.gain.linearRampToValueAtTime(0, now + 0.12)
+
         const node = this.spinNode
-        setTimeout(() => node.stop(), 200)
+        const clickOsc = (node as any)._clickOsc
+        const clickGain = (node as any)._clickGain
+
+        setTimeout(() => {
+            try { node.stop() } catch {}
+            try { clickOsc?.stop() } catch {}
+        }, 150)
+
         this.spinNode = null
         this.spinGain = null
     }
 
     // ─── Single coin clink ─────────────────────────────────────────────────────
-
     coin(delay = 0) {
         const ctx = this.getCtx()
-        const master = this.masterGain(ctx, 0.35)
+        const out = this.out(ctx, 0.4)
         const now = ctx.currentTime + delay
 
-        const gainNode = ctx.createGain()
-        gainNode.connect(master)
-        this.envelope(gainNode, ctx, 0.001, 0.05, 0.1, 0.25, now, 1)
-
-        // Two sine waves slightly detuned = metallic coin sound
-        this.oscillator(ctx, gainNode, "sine", 1200, now, now + 0.35)
-        this.oscillator(ctx, gainNode, "sine", 1450, now, now + 0.25)
+        // Two slightly detuned sines = metallic
+        for (const [freq, dur] of [[1180, 0.3], [1460, 0.22], [2200, 0.12]] as [number, number][]) {
+            const g = ctx.createGain()
+            g.connect(out)
+            this.adsr(g, ctx, 0.001, 0.04, 0.15, dur, now, 0.7)
+            this.osc(ctx, g, "sine", freq, now, now + dur + 0.06)
+        }
     }
 
-    // ─── Cascading coins (for win) ─────────────────────────────────────────────
-
+    // ─── Cascading coins ───────────────────────────────────────────────────────
     coins(duration = 2.5) {
         this.stopCoins()
         let elapsed = 0
-        const interval = 120  // ms between coins
+        const interval = 110
+
         this.coinInterval = setInterval(() => {
-            this.coin()
+            // Vary pitch slightly for natural cascade feel
+            this.coinPitched(0.85 + Math.random() * 0.3)
             elapsed += interval
             if (elapsed >= duration * 1000) this.stopCoins()
         }, interval)
+    }
+
+    private coinPitched(pitchMul: number) {
+        const ctx = this.getCtx()
+        const out = this.out(ctx, 0.35)
+        const now = ctx.currentTime
+
+        for (const [freq, dur] of [[1180 * pitchMul, 0.28], [1460 * pitchMul, 0.2]] as [number, number][]) {
+            const g = ctx.createGain()
+            g.connect(out)
+            this.adsr(g, ctx, 0.001, 0.03, 0.1, dur, now, 0.6)
+            this.osc(ctx, g, "sine", freq, now, now + dur + 0.04)
+        }
     }
 
     stopCoins() {
@@ -169,37 +160,52 @@ export class SoundManager {
     }
 
     // ─── Victory jingle ────────────────────────────────────────────────────────
-
-    win() {
+    win(jackpot = false) {
         const ctx = this.getCtx()
-        const master = this.masterGain(ctx, 0.4)
+        const out = this.out(ctx, 0.45)
         const now = ctx.currentTime
 
-        // Happy ascending arpeggio: C4 E4 G4 C5
-        const notes = [261.63, 329.63, 392.0, 523.25]
-        const noteDur = 0.13
-        const gap = 0.11
-
-        notes.forEach((freq, i) => {
-            const t = now + i * (noteDur + gap)
-            const gainNode = ctx.createGain()
-            gainNode.connect(master)
-            this.envelope(gainNode, ctx, 0.01, 0.05, 0.6, 0.2, t, 1)
-            this.oscillator(ctx, gainNode, "triangle", freq, t, t + noteDur + 0.2)
-            // Add a shimmer octave above
-            const gainNode2 = ctx.createGain()
-            gainNode2.connect(master)
-            this.envelope(gainNode2, ctx, 0.01, 0.05, 0.3, 0.15, t, 0.5)
-            this.oscillator(ctx, gainNode2, "sine", freq * 2, t, t + noteDur + 0.1)
-        })
-
-        // Final chord hold
-        const tFinal = now + notes.length * (noteDur + gap)
-        notes.forEach(freq => {
-            const g = ctx.createGain()
-            g.connect(master)
-            this.envelope(g, ctx, 0.02, 0.1, 0.5, 0.5, tFinal, 0.6)
-            this.oscillator(ctx, g, "triangle", freq, tFinal, tFinal + 0.8)
-        })
+        if (jackpot) {
+            // Fanfare: faster, higher, with extra shimmer
+            const notes = [261.63, 329.63, 392.0, 523.25, 659.25, 783.99]
+            notes.forEach((freq, i) => {
+                const t = now + i * 0.1
+                const g = ctx.createGain()
+                g.connect(out)
+                this.adsr(g, ctx, 0.005, 0.04, 0.6, 0.25, t, 1)
+                this.osc(ctx, g, "triangle", freq, t, t + 0.3)
+                this.osc(ctx, g, "sine", freq * 2, t, t + 0.2)
+            })
+            // Big chord at the end
+            const tEnd = now + notes.length * 0.1 + 0.05
+            ;[261.63, 392.0, 523.25, 659.25].forEach(freq => {
+                const g = ctx.createGain()
+                g.connect(out)
+                this.adsr(g, ctx, 0.01, 0.05, 0.7, 0.8, tEnd, 0.8)
+                this.osc(ctx, g, "triangle", freq, tEnd, tEnd + 1.2)
+            })
+        } else {
+            // Standard: C E G C ascending + chord
+            const notes = [261.63, 329.63, 392.0, 523.25]
+            const step = 0.13
+            notes.forEach((freq, i) => {
+                const t = now + i * step
+                const g = ctx.createGain()
+                g.connect(out)
+                this.adsr(g, ctx, 0.008, 0.04, 0.55, 0.2, t, 0.9)
+                this.osc(ctx, g, "triangle", freq, t, t + 0.28)
+                const g2 = ctx.createGain()
+                g2.connect(out)
+                this.adsr(g2, ctx, 0.008, 0.04, 0.25, 0.15, t, 0.45)
+                this.osc(ctx, g2, "sine", freq * 2, t, t + 0.2)
+            })
+            const tEnd = now + notes.length * step + 0.04
+            notes.forEach(freq => {
+                const g = ctx.createGain()
+                g.connect(out)
+                this.adsr(g, ctx, 0.01, 0.08, 0.5, 0.55, tEnd, 0.55)
+                this.osc(ctx, g, "triangle", freq, tEnd, tEnd + 0.85)
+            })
+        }
     }
 }
